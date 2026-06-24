@@ -8,7 +8,14 @@ const BASE_WIN_CHANCE = 0.4;
 const CLOVER_WIN_BONUS = 0.1;
 const CHARM_WIN_BONUS = 0.08;
 const PAYOUT_MULTIPLIER = 2.0;
-const GAMBLE_COOLDOWN = 5 * 60 * 1000;
+
+// Helper function to check if user is staff or admin
+function isStaffOrAdmin(member) {
+    if (!member) return false;
+    // Checks if member has ADMINISTRATOR permission or Staff/Admin roles
+    if (member.permissions.has('ADMINISTRATOR')) return true;
+    return member.roles.cache.some(role => ['Staff', 'Admin'].includes(role.name));
+}
 
 export default {
     data: new SlashCommandBuilder()
@@ -28,26 +35,24 @@ export default {
             
             const userId = interaction.user.id;
             const guildId = interaction.guildId;
-            const betAmount = interaction.options.getInteger("amount");
-            const now = Date.now();
+            const member = await interaction.guild.members.fetch(userId);
+            const userIsStaffOrAdmin = isStaffOrAdmin(member);
 
-            const userData = await getEconomyData(client, guildId, userId);
-            const lastGamble = userData.lastGamble || 0;
-            let cloverCount = userData.inventory["lucky_clover"] || 0;
-            let charmCount = userData.inventory["lucky_charm"] || 0;
-
-            if (now < lastGamble + GAMBLE_COOLDOWN) {
-                const remaining = lastGamble + GAMBLE_COOLDOWN - now;
-                const minutes = Math.floor(remaining / (1000 * 60));
-                const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
-
+            // Check if user is staff or admin
+            if (!userIsStaffOrAdmin) {
                 throw createError(
-                    "Gamble cooldown active",
-                    ErrorTypes.RATE_LIMIT,
-                    `You need to cool down before gambling again. Wait **${minutes}m ${seconds}s**.`,
-                    { remaining, cooldownType: 'gamble' }
+                    "Permission denied",
+                    ErrorTypes.PERMISSION,
+                    "Only **Staff** and **Admin** members can use this command!",
+                    { userId, guildId }
                 );
             }
+
+            const betAmount = interaction.options.getInteger("amount");
+
+            const userData = await getEconomyData(client, guildId, userId);
+            let cloverCount = userData.inventory["lucky_clover"] || 0;
+            let charmCount = userData.inventory["lucky_charm"] || 0;
 
             if (userData.wallet < betAmount) {
                 throw createError(
@@ -83,14 +88,14 @@ export default {
 
             if (win) {
                 const amountWon = Math.floor(betAmount * PAYOUT_MULTIPLIER);
-cashChange = amountWon;
+                cashChange = amountWon;
 
                 resultEmbed = successEmbed(
                     "🎉 You Won!",
                     `You successfully gambled and turned your **$${betAmount.toLocaleString()}** bet into **$${amountWon.toLocaleString()}**!${cloverMessage}`,
                 );
             } else {
-cashChange = -betAmount;
+                cashChange = -betAmount;
 
                 resultEmbed = warningEmbed(
                     "💔 You Lost...",
@@ -99,7 +104,6 @@ cashChange = -betAmount;
             }
 
             userData.wallet = (userData.wallet || 0) + cashChange;
-userData.lastGamble = now;
 
             await setEconomyData(client, guildId, userId, userData);
 
@@ -121,7 +125,7 @@ userData.lastGamble = now;
                 });
             } else {
                 resultEmbed.setFooter({
-                    text: `Next gamble available in 5 minutes. Base win chance: ${Math.round(BASE_WIN_CHANCE * 100)}%.`,
+                    text: `Base win chance: ${Math.round(BASE_WIN_CHANCE * 100)}%. No Cooldown ✅`,
                 });
             }
 
