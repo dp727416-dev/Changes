@@ -1,5 +1,5 @@
-import { SlashCommandBuilder } from 'discord.js';
-import { createEmbed, successEmbed, infoEmbed, warningEmbed } from '../../utils/embeds.js';
+import { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } from 'discord.js';
+import { createEmbed, successEmbed, warningEmbed } from '../../utils/embeds.js';
 import { getEconomyData, setEconomyData } from '../../utils/economy.js';
 import { withErrorHandling, createError, ErrorTypes } from '../../utils/errorHandler.js';
 import { InteractionHelper } from '../../utils/interactionHelper.js';
@@ -9,126 +9,126 @@ const CLOVER_WIN_BONUS = 0.1;
 const CHARM_WIN_BONUS = 0.08;
 const PAYOUT_MULTIPLIER = 2.0;
 
-// Helper function to check if user is staff or admin
-function isStaffOrAdmin(member) {
-    if (!member) return false;
-    // Checks if member has ADMINISTRATOR permission or Staff/Admin roles
-    if (member.permissions.has('ADMINISTRATOR')) return true;
-    return member.roles.cache.some(role => ['Staff', 'Admin'].includes(role.name));
-}
-
 export default {
     data: new SlashCommandBuilder()
         .setName('gamble')
-        .setDescription('Gamble your money for a chance to win more')
+        .setDescription('Admin-only gamble command')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDMPermission(false)
         .addIntegerOption(option =>
             option
                 .setName('amount')
                 .setDescription('Amount of cash to gamble')
                 .setRequired(true)
                 .setMinValue(1)
+        )
+        .addUserOption(option =>
+            option
+                .setName('user')
+                .setDescription('User to gamble for')
+                .setRequired(true)
         ),
+    category: 'Economy',
+    abuseProtection: {
+        enabled: false
+    },
 
     execute: withErrorHandling(async (interaction, config, client) => {
-        const deferred = await InteractionHelper.safeDefer(interaction);
+        const deferred = await InteractionHelper.safeDefer(interaction, {
+            flags: MessageFlags.Ephemeral,
+        });
         if (!deferred) return;
             
-            const userId = interaction.user.id;
-            const guildId = interaction.guildId;
-            const member = await interaction.guild.members.fetch(userId);
-            const userIsStaffOrAdmin = isStaffOrAdmin(member);
+        const targetUser = interaction.options.getUser('user');
+        const guildId = interaction.guildId;
 
-            // Check if user is staff or admin
-            if (!userIsStaffOrAdmin) {
-                throw createError(
-                    "Permission denied",
-                    ErrorTypes.PERMISSION,
-                    "Only **Staff** and **Admin** members can use this command!",
-                    { userId, guildId }
-                );
-            }
+        if (targetUser.bot) {
+            throw createError(
+                'Invalid Target',
+                ErrorTypes.VALIDATION,
+                'You cannot gamble with a bot.',
+                { userId: targetUser.id }
+            );
+        }
 
-            const betAmount = interaction.options.getInteger("amount");
+        const betAmount = interaction.options.getInteger('amount');
+        const userData = await getEconomyData(client, guildId, targetUser.id);
+        let cloverCount = userData.inventory["lucky_clover"] || 0;
+        let charmCount = userData.inventory["lucky_charm"] || 0;
 
-            const userData = await getEconomyData(client, guildId, userId);
-            let cloverCount = userData.inventory["lucky_clover"] || 0;
-            let charmCount = userData.inventory["lucky_charm"] || 0;
+        if (userData.wallet < betAmount) {
+            throw createError(
+                'Insufficient cash for gamble',
+                ErrorTypes.VALIDATION,
+                `${targetUser.username} only has $${userData.wallet.toLocaleString()} cash, but is trying to bet $${betAmount.toLocaleString()}.`,
+                { required: betAmount, current: userData.wallet }
+            );
+        }
 
-            if (userData.wallet < betAmount) {
-                throw createError(
-                    "Insufficient cash for gamble",
-                    ErrorTypes.VALIDATION,
-                    `You only have $${userData.wallet.toLocaleString()} cash, but you are trying to bet $${betAmount.toLocaleString()}.`,
-                    { required: betAmount, current: userData.wallet }
-                );
-            }
+        let winChance = BASE_WIN_CHANCE;
+        let cloverMessage = "";
+        let usedClover = false;
+        let usedCharm = false;
 
-            let winChance = BASE_WIN_CHANCE;
-            let cloverMessage = "";
-            let usedClover = false;
-            let usedCharm = false;
+        if (cloverCount > 0) {
+            winChance += CLOVER_WIN_BONUS;
+            userData.inventory["lucky_clover"] -= 1;
+            cloverMessage = `\n🍀 **Lucky Clover Consumed:** Win chance was boosted!`;
+            usedClover = true;
+        } else if (charmCount > 0) {
+            winChance += CHARM_WIN_BONUS;
+            userData.inventory["lucky_charm"] -= 1;
+            cloverMessage = `\n✨ **Lucky Charm Used:** Win chance was boosted!`;
+            usedCharm = true;
+        }
 
-            if (cloverCount > 0) {
-                winChance += CLOVER_WIN_BONUS;
-                userData.inventory["lucky_clover"] -= 1;
-                cloverMessage = `\n🍀 **Lucky Clover Consumed:** Your win chance was boosted!`;
-                usedClover = true;
-            }
-            
-            else if (charmCount > 0) {
-                winChance += CHARM_WIN_BONUS;
-                userData.inventory["lucky_charm"] -= 1;
-                cloverMessage = `\n🍀 **Lucky Charm Used (${charmCount - 1} uses remaining):** Your win chance was boosted!`;
-                usedCharm = true;
-            }
+        const win = Math.random() < winChance;
+        let cashChange = 0;
+        let resultEmbed;
 
-            const win = Math.random() < winChance;
-            let cashChange = 0;
-            let resultEmbed;
+        if (win) {
+            const amountWon = Math.floor(betAmount * PAYOUT_MULTIPLIER);
+            cashChange = amountWon;
 
-            if (win) {
-                const amountWon = Math.floor(betAmount * PAYOUT_MULTIPLIER);
-                cashChange = amountWon;
+            resultEmbed = successEmbed(
+                "🎉 You Won!",
+                `${targetUser.username} successfully gambled and turned **$${betAmount.toLocaleString()}** into **$${amountWon.toLocaleString()}**!${cloverMessage}`,
+            );
+        } else {
+            cashChange = -betAmount;
 
-                resultEmbed = successEmbed(
-                    "🎉 You Won!",
-                    `You successfully gambled and turned your **$${betAmount.toLocaleString()}** bet into **$${amountWon.toLocaleString()}**!${cloverMessage}`,
-                );
-            } else {
-                cashChange = -betAmount;
+            resultEmbed = warningEmbed(
+                "💔 You Lost...",
+                `The dice rolled against ${targetUser.username}. They lost their **$${betAmount.toLocaleString()}** bet.`,
+            );
+        }
 
-                resultEmbed = warningEmbed(
-                    "💔 You Lost...",
-                    `The dice rolled against you. You lost your **$${betAmount.toLocaleString()}** bet.`,
-                );
-            }
+        userData.wallet = (userData.wallet || 0) + cashChange;
 
-            userData.wallet = (userData.wallet || 0) + cashChange;
+        await setEconomyData(client, guildId, targetUser.id, userData);
 
-            await setEconomyData(client, guildId, userId, userData);
+        const newCash = userData.wallet;
 
-            const newCash = userData.wallet;
+        resultEmbed.addFields({
+            name: "New Cash Balance",
+            value: `$${newCash.toLocaleString()}`,
+            inline: true,
+        });
 
-            resultEmbed.addFields({
-                name: "New Cash Balance",
-                value: `$${newCash.toLocaleString()}`,
-                inline: true,
+        if (usedClover) {
+            resultEmbed.setFooter({
+                text: `${userData.inventory["lucky_clover"]} Lucky Clovers remaining. Win chance: ${Math.round(winChance * 100)}%`,
             });
+        } else if (usedCharm) {
+            resultEmbed.setFooter({
+                text: `${userData.inventory["lucky_charm"]} Lucky Charm uses remaining. Win chance: ${Math.round(winChance * 100)}%`,
+            });
+        } else {
+            resultEmbed.setFooter({
+                text: `Base win chance: ${Math.round(BASE_WIN_CHANCE * 100)}% | No Cooldown ✅`,
+            });
+        }
 
-            if (usedClover) {
-                resultEmbed.setFooter({
-                    text: `You have ${userData.inventory["lucky_clover"]} Lucky Clovers left. Win chance was ${Math.round(winChance * 100)}%.`,
-                });
-            } else if (usedCharm) {
-                resultEmbed.setFooter({
-                    text: `You have ${userData.inventory["lucky_charm"]} Lucky Charm uses left. Win chance was ${Math.round(winChance * 100)}%.`,
-                });
-            } else {
-                resultEmbed.setFooter({
-                    text: `Base win chance: ${Math.round(BASE_WIN_CHANCE * 100)}%. No Cooldown ✅`,
-                });
-            }
-
-            await InteractionHelper.safeEditReply(interaction, { embeds: [resultEmbed] });
+        await InteractionHelper.safeEditReply(interaction, { embeds: [resultEmbed] });
     }, { command: 'gamble' })
 };
